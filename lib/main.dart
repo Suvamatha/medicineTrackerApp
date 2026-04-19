@@ -12,11 +12,8 @@ import 'history_screen.dart';
 import 'splash_screen.dart';
 import 'localization.dart';
 
-
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
-
-    
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,21 +21,26 @@ void main() async {
   await Hive.initFlutter();
   await Hive.openBox('medBox');
 
-  tz.initializeTimeZones() ;
+  tz.initializeTimeZones();
 
-  const AndroidInitializationSettings andriodSetting = 
-  AndroidInitializationSettings('@mipmap/ic_launcher');
+  const AndroidInitializationSettings androidSetting =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
 
-  const InitializationSettings initSetting = InitializationSettings(android: andriodSetting);
+  const InitializationSettings initSetting =
+      InitializationSettings(android: androidSetting);
 
   await flutterLocalNotificationsPlugin.initialize(initSetting);
-  
-  runApp(MyApp());
 
- 
+  // Request notification permission on Android 13+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.requestNotificationsPermission();
+
+  runApp(const MyApp());
 }
 
-Future<void> scheduleNotification({
+Future<bool> scheduleNotification({
   required int id,
   required String title,
   required String body,
@@ -53,68 +55,95 @@ Future<void> scheduleNotification({
     now.month,
     now.day,
     hour,
-    minute
+    minute,
   );
-  
+
   if (scheduleDate.isBefore(now)) {
     scheduleDate = scheduleDate.add(const Duration(days: 1));
   }
 
-  await flutterLocalNotificationsPlugin.zonedSchedule(
-    id,
-    title,
-    body,
-    tz.TZDateTime.from(scheduleDate, tz.local),
-    const NotificationDetails(
-      android: AndroidNotificationDetails(
-        'med_channel',
-        'Medicine Reminder',
-        importance: Importance.max,
-        priority: Priority.high,
-      ),
+  const notifDetails = NotificationDetails(
+    android: AndroidNotificationDetails(
+      'med_channel',
+      'Medicine Reminder',
+      importance: Importance.max,
+      priority: Priority.high,
     ),
-    androidAllowWhileIdle: true,
-    uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-    matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
   );
+
+  // Try exact alarm first; fall back to inexact if permission denied
+  try {
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      id,
+      title,
+      body,
+      tz.TZDateTime.from(scheduleDate, tz.local),
+      notifDetails,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents:
+          repeatDaily ? DateTimeComponents.time : null,
+    );
+    return true;
+  } catch (_) {
+    // Fallback: inexact alarm — works on all Android versions
+    try {
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        title,
+        body,
+        tz.TZDateTime.from(scheduleDate, tz.local),
+        notifDetails,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents:
+            repeatDaily ? DateTimeComponents.time : null,
+      );
+      return true;
+    } catch (_) {
+      return false; // Notification failed but medicine will still be saved
+    }
+  }
 }
 
 Future<void> snoozeNotification(int originalId, String name) async {
   final snoozeTime = DateTime.now().add(const Duration(minutes: 10));
   await scheduleNotification(
-    id: originalId + 10000, // Safe offset for snoozed IDs
+    id: originalId + 10000,
     title: 'Snoozed: $name',
     body: 'It has been 10 minutes. Please take your medicine.',
     hour: snoozeTime.hour,
     minute: snoozeTime.minute,
     repeatDaily: false,
   );
+  // Snooze failures are silently ignored — notification is best-effort
 }
 
- Future<void> showNotification()async {
-    const AndroidNotificationDetails andriodDetails = 
-    AndroidNotificationDetails(
-      'med_channel',
-      'Medicine Remainder',
-      importance: Importance.max,
-      priority: Priority.high,
-    );
+Future<void> showNotification() async {
+  const AndroidNotificationDetails androidDetails =
+      AndroidNotificationDetails(
+    'med_channel',
+    'Medicine Reminder',
+    importance: Importance.max,
+    priority: Priority.high,
+  );
 
-    const NotificationDetails details =
-    NotificationDetails(android: andriodDetails);
+  const NotificationDetails details =
+      NotificationDetails(android: androidDetails);
 
-    await flutterLocalNotificationsPlugin.show(
-      DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      'Time to take your medicine',
-      'Please take your medicine now',
-      details,
-    );
-
-    
-  }
-
+  await flutterLocalNotificationsPlugin.show(
+    DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    'Time to take your medicine',
+    'Please take your medicine now',
+    details,
+  );
+}
 
 class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -126,7 +155,8 @@ class MyApp extends StatelessWidget {
           seedColor: Colors.teal,
           brightness: Brightness.light,
         ),
-        textTheme: GoogleFonts.poppinsTextTheme(Theme.of(context).textTheme),
+        textTheme:
+            GoogleFonts.poppinsTextTheme(Theme.of(context).textTheme),
         scaffoldBackgroundColor: const Color(0xFFF8FAFC),
         appBarTheme: AppBarTheme(
           backgroundColor: Colors.transparent,
@@ -145,32 +175,32 @@ class MyApp extends StatelessWidget {
 }
 
 class MedicineScreen extends StatefulWidget {
+  const MedicineScreen({super.key});
+
   @override
   _MedicineScreenState createState() => _MedicineScreenState();
 }
 
-
-
 class _MedicineScreenState extends State<MedicineScreen> {
-
   int total = 0;
   int taken = 0;
   int missed = 0;
   int pending = 0;
 
-  void updateState(){
-  total = medicines.length;
-  taken = medicines.where((m) => m['status'] == "taken").length;
-  missed = medicines.where((m) => m['status'] == "missed").length;
-  pending = medicines.where((m) => m['status'] == "pending").length;
-}
+  void updateState() {
+    total = medicines.length;
+    taken = medicines.where((m) => m['status'] == "taken").length;
+    missed = medicines.where((m) => m['status'] == "missed").length;
+    pending = medicines.where((m) => m['status'] == "pending").length;
+  }
 
   var box = Hive.box('medBox');
   List medicines = [];
+
+  // FIX: Controller declared here so it can be properly disposed
   final TextEditingController nameController = TextEditingController();
 
   TimeOfDay? selectedTime;
-
   bool repeatDaily = false;
   bool isNepali = false;
 
@@ -179,14 +209,24 @@ class _MedicineScreenState extends State<MedicineScreen> {
     super.initState();
     isNepali = box.get('isNepali', defaultValue: false);
     _checkDailyReset();
-    medicines = box.get('medicines', defaultValue: []);
+   // AFTER — works in both debug and release
+    medicines = (box.get('medicines', defaultValue: []) as List)
+    .map((e) => Map<String, dynamic>.from(e))
+    .toList();
     updateState();
+  }
+
+  // FIX: Dispose the controller to prevent memory leaks
+  @override
+  void dispose() {
+    nameController.dispose();
+    super.dispose();
   }
 
   void _exportData() {
     final Map<String, dynamic> data = {
       "medicines": box.get('medicines', defaultValue: []),
-      "history": box.get('history', defaultValue: [])
+      "history": box.get('history', defaultValue: []),
     };
     final String jsonStr = jsonEncode(data);
     Clipboard.setData(ClipboardData(text: jsonStr));
@@ -198,9 +238,11 @@ class _MedicineScreenState extends State<MedicineScreen> {
   void _checkDailyReset() {
     String today = DateTime.now().toString().substring(0, 10);
     String? lastOpened = box.get('lastOpenedDate');
-    
+
     if (lastOpened != today) {
-      List meds = box.get('medicines', defaultValue: []);
+      List meds = (box.get('medicines', defaultValue: []) as List)
+    .map((e) => Map<String, dynamic>.from(e))
+    .toList();
       for (var m in meds) {
         if (m['repeatDaily'] == true && m['status'] != 'pending') {
           m['status'] = 'pending';
@@ -209,6 +251,22 @@ class _MedicineScreenState extends State<MedicineScreen> {
       box.put('medicines', meds);
       box.put('lastOpenedDate', today);
     }
+  }
+
+  // FIX: Collision-safe ID using a persistent counter in Hive
+  int _nextId() {
+    int id = box.get('nextId', defaultValue: 1);
+    box.put('nextId', id + 1);
+    return id;
+  }
+
+  // FIX: Helper to append a record to the persistent history box key
+  void _appendHistory(Map<String, dynamic> record) {
+    List history = (box.get('history', defaultValue: []) as List)
+    .map((e) => Map<String, dynamic>.from(e))
+    .toList();
+    history.add(record);
+    box.put('history', history);
   }
 
   void _showAddMedicineSheet(BuildContext context) {
@@ -249,17 +307,33 @@ class _MedicineScreenState extends State<MedicineScreen> {
                     controller: nameController,
                     onChanged: (val) {
                       String lower = val.toLowerCase();
-                      if (lower.contains("morning") || lower.contains("बिहान")) {
-                        setModalState(() { selectedTime = const TimeOfDay(hour: 8, minute: 0); });
-                      } else if (lower.contains("afternoon") || lower.contains("lunch") || lower.contains("दिउँसो")) {
-                        setModalState(() { selectedTime = const TimeOfDay(hour: 13, minute: 0); });
-                      } else if (lower.contains("night") || lower.contains("evening") || lower.contains("sleep") || lower.contains("राति")) {
-                        setModalState(() { selectedTime = const TimeOfDay(hour: 21, minute: 0); });
+                      if (lower.contains("morning") ||
+                          lower.contains("बिहान")) {
+                        setModalState(() {
+                          selectedTime =
+                              const TimeOfDay(hour: 8, minute: 0);
+                        });
+                      } else if (lower.contains("afternoon") ||
+                          lower.contains("lunch") ||
+                          lower.contains("दिउँसो")) {
+                        setModalState(() {
+                          selectedTime =
+                              const TimeOfDay(hour: 13, minute: 0);
+                        });
+                      } else if (lower.contains("night") ||
+                          lower.contains("evening") ||
+                          lower.contains("sleep") ||
+                          lower.contains("राति")) {
+                        setModalState(() {
+                          selectedTime =
+                              const TimeOfDay(hour: 21, minute: 0);
+                        });
                       }
                     },
                     decoration: InputDecoration(
                       labelText: Loc.get("Medicine Name", isNepali),
-                      prefixIcon: const Icon(Icons.medical_services_outlined),
+                      prefixIcon:
+                          const Icon(Icons.medical_services_outlined),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide.none,
@@ -276,12 +350,10 @@ class _MedicineScreenState extends State<MedicineScreen> {
                         initialTime: TimeOfDay.now(),
                       );
                       if (picked != null) {
-                        setModalState(() {
-                          selectedTime = picked;
-                        });
+                        setModalState(() => selectedTime = picked);
                         setState(() {
-                          updateState();
                           selectedTime = picked;
+                          updateState();
                         });
                       }
                     },
@@ -304,51 +376,91 @@ class _MedicineScreenState extends State<MedicineScreen> {
                   ),
                   const SizedBox(height: 16),
                   SwitchListTile(
-                    title: Text(Loc.get("Repeat Daily", isNepali), style: const TextStyle(fontWeight: FontWeight.w500)),
-                    subtitle: Text(Loc.get("Remind me every day", isNepali)),
+                    title: Text(
+                      Loc.get("Repeat Daily", isNepali),
+                      style:
+                          const TextStyle(fontWeight: FontWeight.w500),
+                    ),
+                    subtitle:
+                        Text(Loc.get("Remind me every day", isNepali)),
                     value: localRepeat,
-                    activeColor: Colors.teal,
+                    activeThumbColor: Colors.teal,
                     onChanged: (bool value) {
-                      setModalState(() {
-                        localRepeat = value;
-                      });
+                      setModalState(() => localRepeat = value);
                     },
                   ),
                   const SizedBox(height: 16),
                   ElevatedButton(
                     onPressed: () async {
-                      if (nameController.text.isEmpty || selectedTime == null) {
+                      if (nameController.text.isEmpty ||
+                          selectedTime == null) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text(Loc.get("Please enter", isNepali))),
+                          SnackBar(
+                              content:
+                                  Text(Loc.get("Please enter", isNepali))),
                         );
                         return;
                       }
 
-                      int newId = DateTime.now().millisecondsSinceEpoch.remainder(100000);
+                      final int newId = _nextId();
+                      final String medName = nameController.text;
+                      final TimeOfDay medTime = selectedTime!;
+                      final bool medRepeat = localRepeat;
 
-                      await scheduleNotification(
-                        id: newId,
-                        title: 'Medicine Reminder',
-                        body: 'Time to take: ${nameController.text}',
-                        hour: selectedTime!.hour,
-                        minute: selectedTime!.minute,
-                        repeatDaily: localRepeat,
-                      );
-                      
-                      setState(() {
-                        medicines.add({
-                          "id": newId,
-                          "name": nameController.text,
-                          "time": selectedTime!.format(context),
-                          "status": "pending",
-                          "repeatDaily": localRepeat,
+                      // Format time safely WITHOUT context (safe after Navigator.pop)
+                      final hour = medTime.hourOfPeriod == 0 ? 12 : medTime.hourOfPeriod;
+                      final minute = medTime.minute.toString().padLeft(2, '0');
+                      final period = medTime.period == DayPeriod.am ? 'AM' : 'PM';
+                      final String timeStr = '$hour:$minute $period';
+
+                      // CRITICAL FIX: Save medicine to Hive FIRST before
+                      // scheduling notification. This ensures medicine is
+                      // always persisted even if notification scheduling fails.
+                      try {
+                        setState(() {
+                          medicines.add({
+                            "id": newId,
+                            "name": medName,
+                            "time": timeStr,  // Safe string, not format(context)
+                            "status": "pending",
+                            "repeatDaily": medRepeat,
+                          });
+                          box.put('medicines', medicines);
+                          updateState();
                         });
-                        box.put('medicines', medicines);
-                      });
-                      
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Error saving: $e')),
+                          );
+                        }
+                        return;
+                      }
+
                       nameController.clear();
                       selectedTime = null;
                       Navigator.pop(context);
+
+                      // Schedule notification after saving (best-effort)
+                      final bool notifScheduled = await scheduleNotification(
+                        id: newId,
+                        title: 'Medicine Reminder',
+                        body: 'Time to take: $medName',
+                        hour: medTime.hour,
+                        minute: medTime.minute,
+                        repeatDaily: medRepeat,
+                      );
+
+                      if (!notifScheduled && context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Medicine saved! (Notification reminder could not be set — please allow exact alarms in Settings)'
+                            ),
+                            duration: Duration(seconds: 4),
+                          ),
+                        );
+                      }
                     },
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
@@ -358,7 +470,11 @@ class _MedicineScreenState extends State<MedicineScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: Text(Loc.get("Save Medicine", isNepali), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    child: Text(
+                      Loc.get("Save Medicine", isNepali),
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
                   ),
                 ],
               ),
@@ -368,35 +484,33 @@ class _MedicineScreenState extends State<MedicineScreen> {
       },
     ).whenComplete(() {
       nameController.clear();
-      setState(() {
-        selectedTime = null;
-      });
+      setState(() => selectedTime = null);
     });
   }
 
   int _selectedIndex = 0;
 
   Widget _buildDashboardTab() {
-    // ---- ANALYTICS LOGIC ----
     List history = box.get('history', defaultValue: []);
-    
+
     // Streak gamification
     int currentStreak = 0;
     int bestStreak = 0;
-    
-    // Group history by date string 'YYYY-MM-DD'
+
     Map<String, List<dynamic>> historyByDate = {};
     for (var h in history) {
       if (h['date'] != null) {
-        String dt = h['date'].toString().substring(0,10);
+        String dt = h['date'].toString().substring(0, 10);
         historyByDate.putIfAbsent(dt, () => []).add(h);
       }
     }
-    
+
     List<String> sortedDates = historyByDate.keys.toList()..sort();
     for (String d in sortedDates) {
-      bool missedAny = historyByDate[d]!.any((h) => h['status'] == 'missed');
-      bool takenAny = historyByDate[d]!.any((h) => h['status'] == 'taken');
+      bool missedAny =
+          historyByDate[d]!.any((h) => h['status'] == 'missed');
+      bool takenAny =
+          historyByDate[d]!.any((h) => h['status'] == 'taken');
       if (missedAny) {
         if (currentStreak > bestStreak) bestStreak = currentStreak;
         currentStreak = 0;
@@ -406,29 +520,35 @@ class _MedicineScreenState extends State<MedicineScreen> {
     }
     if (currentStreak > bestStreak) bestStreak = currentStreak;
 
-    // Weekly Adherence
+    // Weekly adherence
     int weekTaken = 0;
     int weekMissed = 0;
-    final sevDaysAgo = DateTime.now().subtract(const Duration(days: 7));
+    final sevenDaysAgo =
+        DateTime.now().subtract(const Duration(days: 7));
     for (var h in history) {
       if (h['date'] != null) {
         DateTime dt = DateTime.parse(h['date']);
-        if (dt.isAfter(sevDaysAgo)) {
+        if (dt.isAfter(sevenDaysAgo)) {
           if (h['status'] == 'taken') weekTaken++;
           if (h['status'] == 'missed') weekMissed++;
         }
       }
     }
     int totalWeek = weekTaken + weekMissed;
-    double adherence = totalWeek == 0 ? 0.0 : (weekTaken / totalWeek) * 100;
+    double adherence =
+        totalWeek == 0 ? 0.0 : (weekTaken / totalWeek) * 100;
 
-    // Last 5 days Missed Trend (Chart Data)
+    // FIX: Corrected bar chart — index matches label, left=oldest, right=today
     List<int> missedTrend = [0, 0, 0, 0, 0];
     for (int i = 0; i < 5; i++) {
-        String d = DateTime.now().subtract(Duration(days: 4 - i)).toString().substring(0, 10);
-        if (historyByDate.containsKey(d)) {
-            missedTrend[i] = historyByDate[d]!.where((h) => h['status'] == 'missed').length;
-        }
+      String d = DateTime.now()
+          .subtract(Duration(days: 4 - i))
+          .toString()
+          .substring(0, 10);
+      if (historyByDate.containsKey(d)) {
+        missedTrend[i] =
+            historyByDate[d]!.where((h) => h['status'] == 'missed').length;
+      }
     }
     int maxMissed = missedTrend.reduce((a, b) => a > b ? a : b);
     if (maxMissed == 0) maxMissed = 1;
@@ -452,9 +572,13 @@ class _MedicineScreenState extends State<MedicineScreen> {
                 margin: const EdgeInsets.all(16),
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
-                  color: Colors.teal.shade700.withValues(alpha: 0.4),
+                  color: Colors.teal.shade700
+                      .withValues(alpha: 0.4),
                   borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: Colors.white.withValues(alpha: 0.3), width: 1.5),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.3),
+                    width: 1.5,
+                  ),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.teal.withValues(alpha: 0.1),
@@ -465,95 +589,124 @@ class _MedicineScreenState extends State<MedicineScreen> {
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        Loc.get("Today's Progress", isNepali),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(Icons.analytics_outlined, color: Colors.white, size: 24),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      buildStat(Loc.get("Total", isNepali), total),
-                      buildStat(Loc.get("Taken", isNepali), taken),
-                      buildStat(Loc.get("Missed", isNepali), missed),
-                      buildStat(Loc.get("Pending", isNepali), pending),
-                    ],
-                  ),
-                  const SizedBox(height: 32),
-                  const Divider(color: Colors.white30),
-                  const SizedBox(height: 16),
-                  Text(
-                    Loc.get("Analytics & Gamification", isNepali),
-                     style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: buildStat(Loc.get("Weekly Adherence", isNepali), adherence.toInt(), isPercent: true),
-                      ),
-                      Expanded(
-                        child: buildStat(Loc.get("Best Streak", isNepali), bestStreak, extra: streakIcon),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: List.generate(5, (i) {
-                      double barHeight = (missedTrend[4 - i] / maxMissed) * 40;
-                      return Column(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          Container(
-                            height: barHeight == 0 ? 4 : barHeight,
-                            width: 12,
-                            decoration: BoxDecoration(
-                              color: missedTrend[4 - i] > 0 ? Colors.redAccent.withValues(alpha: 0.8) : Colors.green.withValues(alpha: 0.8),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
+                  children: [
+                    Row(
+                      mainAxisAlignment:
+                          MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          Loc.get("Today's Progress", isNepali),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            "-${4 - i}d",
-                            style: const TextStyle(color: Colors.white70, fontSize: 10),
-                          )
-                        ],
-                      );
-                    }),
-                  )
-                ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color:
+                                Colors.white.withValues(alpha: 0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                              Icons.analytics_outlined,
+                              color: Colors.white,
+                              size: 24),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    Row(
+                      mainAxisAlignment:
+                          MainAxisAlignment.spaceAround,
+                      children: [
+                        buildStat(
+                            Loc.get("Total", isNepali), total),
+                        buildStat(
+                            Loc.get("Taken", isNepali), taken),
+                        buildStat(
+                            Loc.get("Missed", isNepali), missed),
+                        buildStat(
+                            Loc.get("Pending", isNepali), pending),
+                      ],
+                    ),
+                    const SizedBox(height: 32),
+                    const Divider(color: Colors.white30),
+                    const SizedBox(height: 16),
+                    Text(
+                      Loc.get("Analytics & Gamification", isNepali),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: buildStat(
+                            Loc.get("Weekly Adherence", isNepali),
+                            adherence.toInt(),
+                            isPercent: true,
+                          ),
+                        ),
+                        Expanded(
+                          child: buildStat(
+                            Loc.get("Best Streak", isNepali),
+                            bestStreak,
+                            extra: streakIcon,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    // FIX: Bar index now matches label correctly (left = oldest)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisAlignment:
+                          MainAxisAlignment.spaceEvenly,
+                      children: List.generate(5, (i) {
+                        double barHeight =
+                            (missedTrend[i] / maxMissed) * 40;
+                        return Column(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            Container(
+                              height:
+                                  barHeight == 0 ? 4 : barHeight,
+                              width: 12,
+                              decoration: BoxDecoration(
+                                color: missedTrend[i] > 0
+                                    ? Colors.redAccent
+                                        .withValues(alpha: 0.8)
+                                    : Colors.green
+                                        .withValues(alpha: 0.8),
+                                borderRadius:
+                                    BorderRadius.circular(4),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              "-${4 - i}d",
+                              style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 10),
+                            ),
+                          ],
+                        );
+                      }),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
-      ],
-    ),
-  );
-}
+        ],
+      ),
+    );
+  }
 
   Widget _buildMedicinesTab() {
     return medicines.isEmpty
@@ -561,182 +714,267 @@ class _MedicineScreenState extends State<MedicineScreen> {
             child: FadeInDown(
               duration: const Duration(milliseconds: 600),
               child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.health_and_safety_outlined, size: 80, color: Colors.teal[200]),
-                          const SizedBox(height: 16),
-                          Text(
-                            "No medications added yet.",
-                            style: TextStyle(color: Colors.grey[600], fontSize: 18),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            "Tap + to add your first reminder.",
-                            style: TextStyle(color: Colors.grey[500], fontSize: 14),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 80), // extra padding for FAB
-                    itemCount: medicines.length,
-                    itemBuilder: (context, index) {
-                      final med = medicines[index];
-                final isTaken = med["status"] == "taken";
-                final isMissed = med["status"] == "missed";
-                
-                Color cardColor = Colors.white.withValues(alpha: 0.3);
-                MaterialColor accentColor = Colors.teal;
-                if (isTaken) {
-                  accentColor = Colors.green;
-                  cardColor = Colors.green.shade50.withValues(alpha: 0.5);
-                } else if (isMissed) {
-                  accentColor = Colors.red;
-                  cardColor = Colors.red.shade50.withValues(alpha: 0.5);
-                }
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.health_and_safety_outlined,
+                      size: 80, color: Colors.teal[200]),
+                  const SizedBox(height: 16),
+                  Text(
+                    "No medications added yet.",
+                    style: TextStyle(
+                        color: Colors.grey[600], fontSize: 18),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    "Tap + to add your first reminder.",
+                    style: TextStyle(
+                        color: Colors.grey[500], fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
+          )
+        : ListView.builder(
+            padding:
+                const EdgeInsets.fromLTRB(16, 8, 16, 80),
+            itemCount: medicines.length,
+            itemBuilder: (context, index) {
+              final med = medicines[index];
+              final isTaken = med["status"] == "taken";
+              final isMissed = med["status"] == "missed";
 
-                return FadeInUp(
-                  duration: const Duration(milliseconds: 500),
-                  delay: Duration(milliseconds: 100 * (index % 10)),
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: cardColor,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.6),
-                              width: 1.5,
-                            ),
+              Color cardColor =
+                  Colors.white.withValues(alpha: 0.3);
+              MaterialColor accentColor = Colors.teal;
+              if (isTaken) {
+                accentColor = Colors.green;
+                cardColor =
+                    Colors.green.shade50.withValues(alpha: 0.5);
+              } else if (isMissed) {
+                accentColor = Colors.red;
+                cardColor =
+                    Colors.red.shade50.withValues(alpha: 0.5);
+              }
+
+              return FadeInUp(
+                duration: const Duration(milliseconds: 500),
+                delay: Duration(
+                    milliseconds: 100 * (index % 10)),
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(
+                          sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: cardColor,
+                          borderRadius:
+                              BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Colors.white
+                                .withValues(alpha: 0.6),
+                            width: 1.5,
                           ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(16.0),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: accentColor.withValues(alpha: 0.1),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(Icons.medication, color: accentColor, size: 28),
                         ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                        child: Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Row(
                             children: [
-                              Text(
-                                med["name"],
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.black87,
-                                  decoration: isTaken ? TextDecoration.lineThrough : null,
+                              Container(
+                                padding:
+                                    const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: accentColor
+                                      .withValues(alpha: 0.1),
+                                  shape: BoxShape.circle,
                                 ),
+                                child: Icon(
+                                    Icons.medication,
+                                    color: accentColor,
+                                    size: 28),
                               ),
-                              const SizedBox(height: 4),
-                              Row(
-                                children: [
-                                  Icon(Icons.access_time, size: 14, color: Colors.grey[600]),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    med["time"],
-                                    style: TextStyle(
-                                      color: Colors.grey[600],
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: accentColor.withValues(alpha: 0.2),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(
-                                      med["status"].toUpperCase(),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      med["name"],
                                       style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.bold,
-                                        color: accentColor[700],
+                                        fontSize: 18,
+                                        fontWeight:
+                                            FontWeight.bold,
+                                        color: Colors.black87,
+                                        decoration: isTaken
+                                            ? TextDecoration
+                                                .lineThrough
+                                            : null,
                                       ),
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      children: [
+                                        Icon(
+                                            Icons.access_time,
+                                            size: 14,
+                                            color:
+                                                Colors.grey[600]),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          med["time"],
+                                          style: TextStyle(
+                                            color:
+                                                Colors.grey[600],
+                                            fontWeight:
+                                                FontWeight.w500,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Container(
+                                          padding: const EdgeInsets
+                                              .symmetric(
+                                              horizontal: 8,
+                                              vertical: 2),
+                                          decoration:
+                                              BoxDecoration(
+                                            color: accentColor
+                                                .withValues(
+                                                    alpha: 0.2),
+                                            borderRadius:
+                                                BorderRadius
+                                                    .circular(12),
+                                          ),
+                                          child: Text(
+                                            med["status"]
+                                                .toUpperCase(),
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight:
+                                                  FontWeight.bold,
+                                              color:
+                                                  accentColor[700],
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
+                              if (med["status"] == "pending") ...[
+                                IconButton(
+                                  icon: const Icon(Icons.snooze,
+                                      color: Colors.orange,
+                                      size: 32),
+                                  onPressed: () async {
+                                    await snoozeNotification(
+                                      med["id"] ??
+                                          _nextId(),
+                                      med["name"],
+                                    );
+                                    ScaffoldMessenger.of(context)
+                                        .showSnackBar(
+                                      SnackBar(
+                                          content: Text(
+                                              'Snoozed ${med["name"]} for 10 minutes')),
+                                    );
+                                  },
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                      Icons.check_circle,
+                                      color: Colors.green,
+                                      size: 32),
+                                  onPressed: () {
+                                    setState(() {
+                                      final now = DateTime.now()
+                                          .toString();
+                                      med["status"] = "taken";
+                                      med["date"] = now;
+                                      box.put(
+                                          'medicines', medicines);
+                                      // FIX: Write to persistent history
+                                      _appendHistory({
+                                        "name": med["name"],
+                                        "time": med["time"],
+                                        "status": "taken",
+                                        "date": now,
+                                      });
+                                      // FIX: Update dashboard counters
+                                      updateState();
+                                    });
+                                  },
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.cancel,
+                                      color: Colors.red,
+                                      size: 32),
+                                  onPressed: () {
+                                    setState(() {
+                                      final now = DateTime.now()
+                                          .toString();
+                                      med["status"] = "missed";
+                                      med["date"] = now;
+                                      box.put(
+                                          'medicines', medicines);
+                                      // FIX: Write to persistent history
+                                      _appendHistory({
+                                        "name": med["name"],
+                                        "time": med["time"],
+                                        "status": "missed",
+                                        "date": now,
+                                      });
+                                      // FIX: Update dashboard counters
+                                      updateState();
+                                    });
+                                  },
+                                ),
+                              ] else ...[
+                                IconButton(
+                                  icon: Icon(
+                                      Icons.delete_outline,
+                                      color: Colors.grey[600]),
+                                  onPressed: () {
+                                    setState(() {
+                                      medicines.removeAt(index);
+                                      box.put(
+                                          'medicines', medicines);
+                                      updateState();
+                                    });
+                                  },
+                                ),
+                              ],
                             ],
                           ),
                         ),
-                        if (med["status"] == "pending") ...[
-                          IconButton(
-                            icon: const Icon(Icons.snooze, color: Colors.orange, size: 32),
-                            onPressed: () async {
-                              await snoozeNotification(med["id"] ?? DateTime.now().millisecondsSinceEpoch.remainder(100000), med["name"]);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Snoozed ${med["name"]} for 10 minutes')),
-                              );
-                            },
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.check_circle, color: Colors.green, size: 32),
-                            onPressed: () {
-                              setState(() {
-                                med["status"] = "taken";
-                                med["date"] = DateTime.now().toString();
-                                box.put('medicines', medicines);
-                              });
-                            },
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.cancel, color: Colors.red, size: 32),
-                            onPressed: () {
-                              setState(() {
-                                med["status"] = "missed";
-                                med["date"] = DateTime.now().toString();
-                                box.put('medicines', medicines);
-                              });
-                            },
-                          ),
-                        ] else ...[
-                          IconButton(
-                            icon: Icon(Icons.delete_outline, color: Colors.grey[600]),
-                            onPressed: () {
-                              setState(() {
-                                medicines.removeAt(index);
-                                box.put('medicines', medicines);
-                              });
-                            },
-                          ),
-                        ],
-                      ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
+              );
+            },
+          );
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<String> _titles = ["Dashboard", "Medicines", "History"];
+    final List<String> titles = [
+      "Dashboard",
+      "Medicines",
+      "History"
+    ];
 
-    Widget _getBody() {
+    Widget getBody() {
       switch (_selectedIndex) {
         case 0:
           return _buildDashboardTab();
         case 1:
           return _buildMedicinesTab();
         case 2:
+          // FIX: Pass isNepali to HistoryScreen
           return HistoryScreen(isNepali: isNepali);
         default:
           return _buildDashboardTab();
@@ -746,7 +984,7 @@ class _MedicineScreenState extends State<MedicineScreen> {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: Text(Loc.get(_titles[_selectedIndex], isNepali)),
+        title: Text(Loc.get(titles[_selectedIndex], isNepali)),
         backgroundColor: Colors.white.withValues(alpha: 0.1),
         flexibleSpace: ClipRRect(
           child: BackdropFilter(
@@ -756,8 +994,11 @@ class _MedicineScreenState extends State<MedicineScreen> {
         ),
         actions: [
           IconButton(
-            icon: Text(isNepali ? '🇬🇧' : '🇳🇵', style: const TextStyle(fontSize: 22)),
-            tooltip: isNepali ? 'Switch to English' : 'नेपालीमा बदल्नुहोस्',
+            icon: Text(isNepali ? '🇬🇧' : '🇳🇵',
+                style: const TextStyle(fontSize: 22)),
+            tooltip: isNepali
+                ? 'Switch to English'
+                : 'नेपालीमा बदल्नुहोस्',
             onPressed: () {
               setState(() {
                 isNepali = !isNepali;
@@ -775,12 +1016,12 @@ class _MedicineScreenState extends State<MedicineScreen> {
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [Color(0xFFE0F7FA), Color(0xFFB2DFDB)], // Premium soft teal glow gradient
+            colors: [Color(0xFFE0F7FA), Color(0xFFB2DFDB)],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
         ),
-        child: SafeArea(child: _getBody()),
+        child: SafeArea(child: getBody()),
       ),
       floatingActionButton: _selectedIndex == 1
           ? BounceInUp(
@@ -791,7 +1032,9 @@ class _MedicineScreenState extends State<MedicineScreen> {
                 foregroundColor: Colors.white,
                 onPressed: () => _showAddMedicineSheet(context),
                 icon: const Icon(Icons.add),
-                label: const Text("Add Med", style: TextStyle(fontWeight: FontWeight.bold)),
+                label: const Text("Add Med",
+                    style:
+                        TextStyle(fontWeight: FontWeight.bold)),
                 elevation: 4,
               ),
             )
@@ -801,7 +1044,7 @@ class _MedicineScreenState extends State<MedicineScreen> {
         onDestinationSelected: (int index) {
           setState(() {
             _selectedIndex = index;
-            updateState(); // Ensure stats are fresh
+            updateState();
           });
         },
         destinations: [
@@ -825,7 +1068,8 @@ class _MedicineScreenState extends State<MedicineScreen> {
     );
   }
 
-  Widget buildStat(String label, int value, {bool isPercent = false, String extra = ""}){
+  Widget buildStat(String label, int value,
+      {bool isPercent = false, String extra = ""}) {
     return Column(
       children: [
         Text(
@@ -844,7 +1088,7 @@ class _MedicineScreenState extends State<MedicineScreen> {
             fontSize: 12,
           ),
           textAlign: TextAlign.center,
-        )
+        ),
       ],
     );
   }
